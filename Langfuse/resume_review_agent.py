@@ -1,6 +1,8 @@
+import re
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
+from langchain_core.messages import AIMessage
 from langchain.agents import create_agent as create_react_agent
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
@@ -11,6 +13,8 @@ langfuse = Langfuse()
 langfuse_handler = CallbackHandler()
 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+EXPECTED_TOOLS = {"score_resume", "identify_strengths", "suggest_improvements"}
 
 
 def render(name: str, **vars) -> str:
@@ -44,12 +48,71 @@ agent = create_react_agent(
 )
 
 
+def extract_resume_score(text: str) -> float | None:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*/\s*10", text)
+    return float(match.group(1)) if match else None
+
+
+def tools_called(messages) -> set[str]:
+    called = set()
+    for msg in messages:
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                called.add(tc["name"])
+    return called
+
+
+def judge_quality(review: str) -> float | None:
+    raw = llm.invoke(render("resume-review/judge", review=review)).content
+    match = re.search(r"\d+(?:\.\d+)?", raw)
+    if not match:
+        return None
+    return max(0.0, min(1.0, float(match.group(0))))
+
+
+def score_run(trace_id: str, messages, final_output: str):
+    resume_score = extract_resume_score(final_output)
+    if resume_score is not None:
+        langfuse.create_score(
+            trace_id=trace_id,
+            name="resume_score",
+            value=resume_score,
+            data_type="NUMERIC",
+            comment="Score (X/10) extracted from agent output",
+        )
+
+    called = tools_called(messages)
+    complete = EXPECTED_TOOLS.issubset(called)
+    langfuse.create_score(
+        trace_id=trace_id,
+        name="tools_completeness",
+        value=complete,
+        data_type="BOOLEAN",
+        comment=f"Called: {sorted(called)}; expected: {sorted(EXPECTED_TOOLS)}",
+    )
+
+    quality = judge_quality(final_output)
+    if quality is not None:
+        langfuse.create_score(
+            trace_id=trace_id,
+            name="review_quality",
+            value=quality,
+            data_type="NUMERIC",
+            comment="LLM-as-judge rating (0.0-1.0) on specificity, actionability, coverage",
+        )
+
+
 def review_resume(resume_text: str) -> str:
     result = agent.invoke(
         {"messages": [("human", f"Please review this resume:\n\n{resume_text}")]},
         config={"callbacks": [langfuse_handler]},
     )
-    return result["messages"][-1].content
+    final_output = result["messages"][-1].content
+    trace_id = langfuse_handler.last_trace_id
+    if trace_id:
+        score_run(trace_id, result["messages"], final_output)
+    langfuse.flush()
+    return final_output
 
 
 if __name__ == "__main__":

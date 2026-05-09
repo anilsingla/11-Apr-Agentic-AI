@@ -42,6 +42,18 @@ List them as:
 1. ...
 2. ...
 3. ...""",
+
+    "resume-review/judge": """You are an evaluator scoring the quality of a resume review.
+
+Rate the review below from 0.0 to 1.0 on:
+- Specificity (concrete observations, not generic advice)
+- Actionability (improvements the candidate can actually apply)
+- Coverage (touches scoring, strengths, and improvements)
+
+Review:
+{{review}}
+
+Respond with ONLY a single number between 0.0 and 1.0. No explanation.""",
 }
 
 
